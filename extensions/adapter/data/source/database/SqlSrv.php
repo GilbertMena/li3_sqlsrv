@@ -2,32 +2,41 @@
 /**
  * Lithium: the most rad php framework
  *
- * @copyright     Copyright 2010, Union of RAD (http://union-of-rad.org)
+ * @copyright     Copyright 2012, Union of RAD (http://union-of-rad.org)
  * @license       http://opensource.org/licenses/bsd-license.php The BSD License
  */
 
 namespace li3_sqlsrv\extensions\adapter\data\source\database;
 
+use PDO;
+use PDOStatement;
+use PDOException;
 use lithium\data\model\QueryException;
 
 /**
  * Extends the `Database` class to implement the necessary SQL-formatting and resultset-fetching
- * features for working with SQL Server.
+ * features for working with MySQL databases.
  *
  * For more information on configuring the database connection, see the `__construct()` method.
  *
- * @see li3_sqlsrv\data\source\SqlSrv::__construct()
+ * @see lithium\data\source\database\adapter\MySql::__construct()
  */
 class SqlSrv extends \lithium\data\source\Database {
+
+	/**
+	 * @var PDO
+	 */
+	public $connection;
 
 	protected $_classes = array(
 		'entity' => 'lithium\data\entity\Record',
 		'set' => 'lithium\data\collection\RecordSet',
 		'relationship' => 'lithium\data\model\Relationship',
+		'result' => 'li3_sqlsrv\extensions\adapter\data\source\database\sql_srv\Result'
 	);
 
 	/**
-	 * SqlSrv column type definitions.
+	 * MySQL column type definitions.
 	 *
 	 * @var array
 	 */
@@ -46,28 +55,6 @@ class SqlSrv extends \lithium\data\source\Database {
 	);
 
 	/**
-	 * Strings used to render the given statement
-	 *
-	 * @see lithium\data\source\Database::renderCommand()
-	 * @var array
-	 */
-	protected $_strings = array(
-		'read'   => "SELECT {:limit} {:fields} From {:source}
-				{:joins} {:conditions} {:group} {:order} {:comment}",
-		'paged'  => "
-			SELECT * From (
-				SELECT {:fields}, ROW_NUMBER() OVER({:order}) AS [__LI3_ROW_NUMBER__]
-				From {:source} {:joins} {:conditions} {:group}
-			) a {:limit} {:comment}",
-		'create' => "INSERT INTO {:source} ({:fields}) VALUES ({:values}) {:comment}",
-		'update' => "UPDATE {:source} SET {:data} {:conditions} {:comment}",
-		'delete' => "DELETE {:flags} From {:source} {:aliases} {:conditions} {:comment}",
-		'schema' => "CREATE TABLE {:source} (\n{:columns}\n) {:indexes} {:comment}",
-		'join'   => "{:type} JOIN {:source} {:constraint}"
-	);
-
-
-	/**
 	 * Pair of opening and closing quote characters used for quoting identifiers in queries.
 	 *
 	 * @var array
@@ -75,23 +62,15 @@ class SqlSrv extends \lithium\data\source\Database {
 	protected $_quotes = array('[', ']');
 
 	/**
-	 * SQL Server-specific value denoting whether or not table aliases should be used in DELETE and
+	 * MySQL-specific value denoting whether or not table aliases should be used in DELETE and
 	 * UPDATE queries.
 	 *
 	 * @var boolean
 	 */
 	protected $_useAlias = true;
 
-    /**
-	 * The available SQL Server driver to use
-	 *
-	 * @var string
-	 */
-
-    protected $driver = 'sqlsrv';
-
 	/**
-	 * Constructs the SQL Server adapter and sets the default port to 1433.
+	 * Constructs the MySQL adapter and sets the default port to 3306.
 	 *
 	 * @see lithium\data\source\Database::__construct()
 	 * @see lithium\data\Source::__construct()
@@ -100,62 +79,17 @@ class SqlSrv extends \lithium\data\source\Database {
 	 *        see `lithium\data\source\Database` and `lithium\data\Source`. Available options
 	 *        defined by this class:
 	 *        - `'database'`: The name of the database to connect to. Defaults to 'lithium'.
-	 *        - `'host'`: The IP or machine name where SQL Server is running, followed by a colon,
-	 *          followed by a port number or socket. Defaults to `(local), 1433`.
-	 *        - `'persistent'`: If a persistent connection (connection pooling) should be made.
+	 *        - `'host'`: The IP or machine name where MySQL is running, followed by a colon,
+	 *          followed by a port number or socket. Defaults to `'localhost:3306'`.
+	 *        - `'persistent'`: If a persistent connection (if available) should be made.
 	 *          Defaults to true.
-	 *        - `encoding`: One of `SQLSRV_ENC_CHAR`, `SQLSRV_ENC_BINARY` or `UTF-8`. Defaults
-	 *          to `SQLSRV_ENC_CHAR` (the SQL Server default).
-	 *        - `encrypted`: Specifies whether the communication with SQL Server is encrypted.
-	 *        - `replica`: Specifies the server and instance of the database's mirror
-	 *          (if enabled and configured) to use when the primary server is unavailable.
-	 *        - `password`: Specifies the password associated with the User ID to be used when
-	 *          connecting with SQL Server Authentication.
-	 *        - `UID`: Specifies the User ID to be used when connecting with
-	 *          SQL Server Authentication.
-	 *        - `APP`: Specifies the application name used in tracing.
-	 *        - `timeout`: Specifies the number of seconds to wait before failing the connection attempt.
 	 *
 	 * Typically, these parameters are set in `Connections::add()`, when adding the adapter to the
 	 * list of active connections.
-	 * @return The adapter instance.
 	 */
 	public function __construct(array $config = array()) {
-		$defaults = array(
-			'APP' => 'app',
-			'host' => '(local), 1433',
-			'UID' => null,
-			'password' => null,
-			'encoding' => SQLSRV_ENC_CHAR,
-			'persistent' => true,
-			'Encrypted' => false,
-			'replica' => null,
-			'timeout' => null,
-			'driver' => null
-		);
-
-		$config = $config + $defaults;
-		$this->_setDriver($config['driver']);
-
-		parent::__construct($config);
-	}
-
-	protected function _setDriver($driver = null) {
-	    if(!empty($driver)) {
-	        $this->driver = $driver;
-	    }
-	    else {
-	        if(function_exists('sqlsrv_connect')) {
-			    $this->driver = 'sqlsrv';
-			    $this->_classes['result'] = 'li3_sqlsrv\extensions\adapter\data\source\database\sql_srv\Result';
-		    } elseif(function_exists('mssql_connect')) {
-			    $this->driver = 'mssql';
-			    $this->_classes['result'] = 'li3_sqlsrv\extensions\adapter\data\source\database\mssql\Result';
-		    }
-		    else {
-		        // @todo Add support for ODBTP		        
-		    }
-		}
+		$defaults = array('host' => 'localhost:1433', 'encoding' => null);
+		parent::__construct($config + $defaults);
 	}
 
 	/**
@@ -163,18 +97,18 @@ class SqlSrv extends \lithium\data\source\Database {
 	 *
 	 * @param string $feature Test for support for a specific feature, i.e. `"transactions"` or
 	 *               `"arrays"`.
-	 * @return boolean Returns `true` if the particular feature (or if SQL Server) support is enabled,
+	 * @return boolean Returns `true` if the particular feature (or if MySQL) support is enabled,
 	 *         otherwise `false`.
 	 */
 	public static function enabled($feature = null) {
 		if (!$feature) {
-			return extension_loaded($this->driver);
+			return extension_loaded('pdo_odbc');
 		}
 		$features = array(
-			'arrays'        => false,
-			'transactions'  => false,
-			'booleans'      => true,
-			'relationships' => true,
+			'arrays' => false,
+			'transactions' => false,
+			'booleans' => true,
+			'relationships' => true
 		);
 		return isset($features[$feature]) ? $features[$feature] : null;
 	}
@@ -186,57 +120,43 @@ class SqlSrv extends \lithium\data\source\Database {
 	 *         `false`.
 	 */
 	public function connect() {
-		$options = array();
 		$config = $this->_config;
 		$this->_isConnected = false;
+		$host = $config['host'];
 
 		if (!$config['database']) {
 			return false;
 		}
 
-		switch($this->driver) {
-	        case 'mssql': $this->mssql_connect($config); break;
-	        case 'sqlsrv': $this->sqlsrv_connect($config); break;
-	    }
-
-		if(!$this->connection) return false;
-
-		return $this->_isConnected = true;
-	}
-
-	protected function mssql_connect($config) {
-
-	    $pc = strpos(PHP_OS,'Win') !== false ? ',' : ':';
-
-	    if(empty($config['persistent'])) { //Not persistent
-	        $this->connection = mssql_connect($config['host'] . $pc . $config['port'], $config['login'], $config['password'], true);
-	    }
-	    else { //Persistent
-	        $this->connection = mssql_pconnect($config['host'] . $pc . $config['port'], $config['login'], $config['password']);
-	    }
-
-	    if($this->connection) {
-	        mssql_select_db($config['database'], $this->connection);
-        }
-	}
-
-	protected function sqlsrv_connect($config) {
-	    $mapping = array(
-			'database'   => 'Database',
-			'replica'    => 'Failover_partner',
-			'password'   => 'PWD',
-			'login'      => 'UID',
-			'persistent' => 'ConnectionPooling',
-			'encoding'   => 'CharacterSet',
-			'timeout'    => 'LoginTimeout'
+		$options = array(
+			PDO::ATTR_PERSISTENT => $config['persistent'],
+			PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION
 		);
-		foreach ($mapping as $from => $to) {
-			if (isset($config[$from])) {
-				$options[$to] = $config[$from];
-			}
+
+		try {
+			list($host, $port) = array(1 => "1433") + explode(':', $host);
+			$dsn = sprintf("odbc:Driver=SQL Server Native Client 11.0; Server=%s; Port=%s; Database=%s; UID=%s; PWD=%s;", $host, $port, $config['database'],$config['login'],$config['password']);
+			//echo "\r\n".'the dsn: '.$dsn; //exit;
+			//$this->connection = new PDO($dsn, $options);
+			$this->connection = new PDO($dsn);
+			//var_dump($this->connection);
+		} catch (PDOException $e) {
+			$error = (string) $e;
+			$code = 1;
+			throw new QueryException("{$error}", $code);
+			return false;
 		}
 
-	    $this->connection = sqlsrv_connect($config['host'], $options);
+		$this->_isConnected = true;
+
+		if ($config['encoding']) {
+			$this->encoding($config['encoding']);
+		}
+//var_dump($this->connection);exit;
+		//$info = $this->connection->getAttribute(PDO::ATTR_SERVER_VERSION);
+
+		//$this->_useAlias = (boolean) version_compare($info, "4.1", ">=");
+		return $this->_isConnected;
 	}
 
 	/**
@@ -246,12 +166,9 @@ class SqlSrv extends \lithium\data\source\Database {
 	 */
 	public function disconnect() {
 		if ($this->_isConnected) {
-		    switch($this->driver) {
-		        case 'sqlsrv': $this->_isConnected = !sqlsrv_close($this->connection); break;
-		        case 'mssql': $this->_isConnected = !mssql_close($this->connection); break;
-		    }
-
-			return !$this->_isConnected;
+			unset($this->connection);
+			$this->_isConnected = false;
+			return true;
 		}
 		return true;
 	}
@@ -260,7 +177,7 @@ class SqlSrv extends \lithium\data\source\Database {
 	 * Returns the list of tables in the currently-connected database.
 	 *
 	 * @param string $model The fully-name-spaced class name of the model object making the request.
-	 * @return array Returns an array of objects to which models can connect.
+	 * @return array Returns an array of sources to which models can connect.
 	 * @filter This method can be filtered.
 	 */
 	public function sources($model = null) {
@@ -280,7 +197,7 @@ class SqlSrv extends \lithium\data\source\Database {
 	}
 
 	/**
-	 * Gets the column schema for a given SQL Server database table.
+	 * Gets the column schema for a given MySQL table.
 	 *
 	 * @param mixed $entity Specifies the table name for which the schema should be returned, or
 	 *        the class name of the model object requesting the schema, in which case the model
@@ -323,7 +240,18 @@ class SqlSrv extends \lithium\data\source\Database {
 		});
 	}
 
-	public function create($query, array $options = array()) {
+	/**
+	 * Gets or sets the encoding for the connection.
+	 *
+	 * @param $encoding
+	 * @return mixed If setting the encoding; returns true on success, else false.
+	 *         When getting, returns the encoding.
+	 */
+	public function encoding($encoding = null) {
+		return true;
+	}
+    
+    public function create($query, array $options = array()) {
 		if (is_object($query)) {
 			$table = $query->source();
 			$this->_execute("Set IDENTITY_INSERT [dbo].[{$table}] On");
@@ -355,54 +283,19 @@ class SqlSrv extends \lithium\data\source\Database {
 	 * @param object $context
 	 * @return array
 	 */
-	public function schema($query, $result = null, $context = null) {
+	public function schema($query, $resource = null, $context = null) {
 		if (is_object($query)) {
-			return parent::schema($query, $result, $context);
-		}
-		$fields = array();
-		$count = 0;
-
-		if($this->driver == 'sqlsrv') {
-		    $count = sqlsrv_num_fields($result->resource());
-
-		    foreach (sqlsrv_field_metadata($result->resource()) as $name => $value) {
-		        // TODO: Ensure this works correctly
-    			if ($name === 'Name') {
-    				$fields[] = $value;
-    			}
-    		}
-		}
-		elseif($this->driver == 'mssql') {
-		    $count = mssql_num_fields($result->resource());
-
-		    for($i == 0; $i < $count; ++$i) {
-		        $field = mssql_fetch_field($result->resource(),$i);
-
-		        $fields[] = $field->name;
-		    }
-
+			return parent::schema($query, $resource, $context);
 		}
 
-		return $fields;
-	}
+		$result = array();
+		$count = $resource->resource()->columnCount();
 
-	public function data($data, $context) {
-		if ($context->type() != "update" || !($entity =& $context->entity())) {
-			return $data;
+		for ($i = 0; $i < $count; $i++) {
+			$meta = $resource->resource()->getColumnMeta($i);
+			$result[] = $meta['name'];
 		}
-
-		$data = array();
-
-		foreach ($entity->export($this) as $name => $value) {
-			$name = $this->name($name);
-			$value = $this->value($value);
-			$data[] = "{$name} = {$value}";
-		}
-		return join(", ", $data);
-	}
-
-	public function encoding($encoding = null) {
-		return true;
+		return $result;
 	}
 
 	/**
@@ -411,37 +304,10 @@ class SqlSrv extends \lithium\data\source\Database {
 	 * @return array
 	 */
 	public function error() {
-	    if($this->driver == 'sqlsrv') {
-		    if ($error = sqlsrv_errors(SQLSRV_ERR_ALL)) {
-			    return array($error[0]['code'], $error[0]['message']);
-		    }
-	    }
-	    elseif($this->driver == 'mssql') {
-	        $error = mssql_get_last_message();
-	        if(!empty($error)) {
-	            return array(001,$error); //Driver does not provide error codes
-	        }
-	    }
-
+		if ($error = $this->connection->errorInfo()) {
+			return array($error[1], $error[2]);
+		}
 		return null;
-	}
-
-	/**
-	 * Returns a TOP clause (usually) from the given limit and the offset of the context object.
-	 *
-	 * @param integer $limit A number of records to which the query is limited to returning.
-	 * @param object $context The `lithium\data\model\Query` object
-	 * @return string
-	 */
-	public function limit($limit, $context) {
-		if (!$limit) {
-			return;
-		}
-		if ($offset = $context->offset() ?: '') {
-			// @todo HERE BE DRAGONS
-			$offset .= ', ';
-		}
-		return "TOP {$limit}";
 	}
 
 	public function alias($alias, $context) {
@@ -450,10 +316,6 @@ class SqlSrv extends \lithium\data\source\Database {
 		}
 		return parent::alias($alias, $context);
 	}
-
-    public function driver() {
-        return $this->driver;
-    }
 
 	/**
 	 * @todo Eventually, this will need to rewrite aliases for DELETE and UPDATE queries, same with
@@ -472,29 +334,123 @@ class SqlSrv extends \lithium\data\source\Database {
  	 *
  	 * @see lithium\data\source\Database::renderCommand()
 	 * @param string $sql The sql string to execute
-	 * @param array $options
+	 * @param array $options Available options:
+	 *        - 'buffered': If set to `false` uses mysql_unbuffered_query which
+	 *          sends the SQL query query to MySQL without automatically fetching and buffering the
+	 *          result rows as `mysql_query()` does (for less memory usage).
 	 * @return resource Returns the result resource handle if the query is successful.
+	 * @filter
 	 */
 	protected function _execute($sql, array $options = array()) {
-		return $this->_filter(__METHOD__, compact('sql', 'options'), function($self, $params) {
+		
+		//echo 'sql: '."\r\n";
+		//echo $sql;
+		//echo "\r\n".'the db: '."\r\n";
+		//echo $this->_config['database']; 
+		$defaults = array('buffered' => true);
+		$options += $defaults;
+		
+		//echo "\r\n".'isConnected:'."\r\n";
+		//var_dump($this->_isConnected);
+		
+		if(!$this->_isConnected)
+		{
+			$this->connect();
+		}
+		
+		//echo "\r\n".'the connection:';
+		//var_dump($this->connection);
+		
+		$this->connection->exec("USE  `{$this->_config['database']}`");
+		
+		//echo "\r\n".'past the db select'."\r\n";
+		//exit;
+		
+		$conn = $this->connection;
+
+		$params = compact('sql', 'options');
+
+		return $this->_filter(__METHOD__, $params, function($self, $params) use ($conn) {
 			$sql = $params['sql'];
 			$options = $params['options'];
-			$resource = null;
-
-			switch($self->driver()) {
-			    case 'sqlsrv': $resource = sqlsrv_query($self->connection, $sql); break;
-			    case 'mssql': $resource = mssql_query($sql,$self->connection); break;
-		    }
-
-			if ($resource === true) {
-				return true;
+			//$statement = $db->prepare($query);
+			//$statement->execute();
+			//echo "\r\n".' The Sql in the filter: '.$sql; //exit;
+			if (!($resource = $conn->query($sql)) instanceof PDOStatement) {
+				list($code, $error) = $self->error();
+				throw new QueryException("{$sql}: {$error}", $code);
 			}
-			if (is_resource($resource)) {
-				return $self->invokeMethod('_instance', array('result', compact('resource')));
-			}
-			list($code, $error) = $self->error();
-			throw new QueryException("{$sql}: {$error}", $code);
+			//echo "\r\n".' The resource';
+			//print_r($resource); //exit;
+			
+			return $self->invokeMethod('_instance', array('result', compact('resource')));
 		});
+	}
+	
+	//returns the resultset from an stored proc
+	public function executeStoredProc($sql, array $options = array()) {
+		
+		//echo 'sql: '."\r\n";
+		//echo $sql;
+		//echo "\r\n".'the db: '."\r\n";
+		//echo $this->_config['database']; 
+		$defaults = array('buffered' => true);
+		$options += $defaults;
+		
+		//echo "\r\n".'isConnected:'."\r\n";
+		//var_dump($this->_isConnected);
+		
+		if(!$this->_isConnected)
+		{
+			$this->connect();
+		}
+		
+		//echo "\r\n".'the connection:';
+		//var_dump($this->connection);
+		
+		$this->connection->exec("USE  `{$this->_config['database']}`");
+		
+		//echo "\r\n".'past the db select'."\r\n";
+		//exit;
+		
+		$conn = $this->connection;
+
+		$params = compact('sql', 'options');
+
+		return $this->_filter(__METHOD__, $params, function($self, $params) use ($conn) {
+			$sql = $params['sql'];
+			$options = $params['options'];
+			//$statement = $db->prepare($query);
+			//$statement->execute();
+			//echo "\r\n".' The Sql in the filter: '.$sql; //exit;
+			if (!($resource = $conn->query($sql)) instanceof PDOStatement) {
+				list($code, $error) = $self->error();
+				throw new QueryException("{$sql}: {$error}", $code);
+			}
+			//echo "\r\n".' The resource'."\r\n";
+			//print_r($resource); //exit;
+			$finalResult = $resource->fetchAll(PDO::FETCH_ASSOC);
+			return $finalResult;
+			//echo "\r\n".' The finalResult: '."\r\n";
+			//print_r($finalResult);
+			//exit;
+			
+			//return $self->invokeMethod('_instance', array('result', compact('resource')));
+		});
+	}
+
+	protected function _results($results) {
+		/* @var $results PDOStatement */
+		$numFields = $results->columnCount();
+		$index = $j = 0;
+
+		while ($j < $numFields) {
+			$column = $results->getColumnMeta($j);
+			$name = $column['name'];
+			$table = $column['table'];
+			$this->map[$index++] = empty($table) ? array(0, $name) : array($table, $name);
+			$j++;
+		}
 	}
 
 	/**
@@ -518,8 +474,8 @@ class SqlSrv extends \lithium\data\source\Database {
 	/**
 	 * Converts database-layer column types to basic types.
 	 *
-	 * @param string $real Real database-layer column type (i.e. "varchar(255)")
-	 * @return string Abstract column type (i.e. "string")
+	 * @param string $real Real database-layer column type (i.e. `"varchar(255)"`)
+	 * @return array Column type (i.e. "string") plus 'length' when appropriate.
 	 */
 	protected function _column($real) {
 
@@ -573,8 +529,8 @@ class SqlSrv extends \lithium\data\source\Database {
 		}
 		return $column;
 	}
-
-	/**
+    
+    /**
 	 * Helper method that retrieves an entity's name via its metadata.
 	 *
 	 * @param string $entity Entity name.
